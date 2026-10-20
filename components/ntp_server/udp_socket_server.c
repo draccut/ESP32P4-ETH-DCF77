@@ -51,28 +51,20 @@ unsigned long getMicros() {
     return tv.tv_usec;
 }
 
-uint64_t getCurrentTimeInNTP64BitFormat() {
-    const uint64_t numberOfSecondsBetween1900and1970 = 2208988800;
-
-    uint64_t clockSecondsSinceEpoch = numberOfSecondsBetween1900and1970 + getEpoch();
-    long clockMicroSeconds = (long)getMicros();
-
-    while (clockMicroSeconds > oneSecond_inMicroseconds_L) {
-        clockSecondsSinceEpoch++;
-        clockMicroSeconds -= oneSecond_inMicroseconds_L;
-    };
-
-    while (clockMicroSeconds < 0L) {
-        clockSecondsSinceEpoch--;
-        clockMicroSeconds += oneSecond_inMicroseconds_L;
-    };
-
-    // for the next two lines to be clear, please see: https://tickelton.gitlab.io/articles/ntp-timestamps/
-
-    double clockMicroSeconds_D = (double)clockMicroSeconds * (double)(4294.967296);
-    return ((uint64_t)clockSecondsSinceEpoch << 32) | (uint64_t)(clockMicroSeconds_D);
+uint64_t getCurrentTimeInNTP64BitFormat(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    uint64_t seconds = (uint64_t)tv.tv_sec + 2208988800ULL;
+    uint64_t fraction = ((uint64_t)tv.tv_usec * 4294ULL) + ((uint64_t)tv.tv_usec * 967296ULL) / 1000000ULL;
+    return (seconds << 32) | (fraction & 0xFFFFFFFFULL);
 }
 
+/**
+ * Client-Timestamp wird sofort nach dem Empfang gerettet memset für sauberes Paket
+ * Korrekter Header: 0x24
+ * Bessere Precision
+ * Kein Überschreiben mehr vor dem Kopieren
+ */
 void udp_server_task(void *pvParameters) {
     char ntp_packet[NTP_PACKET_SIZE];
     int addr_family = AF_INET;
@@ -103,81 +95,84 @@ void udp_server_task(void *pvParameters) {
     while (1) {
         struct sockaddr_in source_addr;
         socklen_t socklen = sizeof(source_addr);
-        int len = recvfrom(sock, ntp_packet, sizeof(ntp_packet) - 1, 0, (struct sockaddr *)&source_addr, &socklen);
+
+        int len = recvfrom(sock, ntp_packet, NTP_PACKET_SIZE, 0,
+                           (struct sockaddr *)&source_addr, &socklen);
+
         ESP_LOGI(TAG, "received udp request");
-        uint64_t receiveTime_uint64_t = getCurrentTimeInNTP64BitFormat();
 
-        if (len < 0 || len > NTP_PACKET_SIZE) {
-            ESP_LOGE(TAG, "recvfrom failed: errno %d", errno);
-            break;
-        } else {
-            ntp_packet[len] = 0;  // Null-terminieren
-            ntp_packet[0] = 0b00011100;
-            // Stratum, or type of clock
-            ntp_packet[1] = 0b00000001;
-            // Polling Interval
-            ntp_packet[2] = 4;
-            ntp_packet[3] = 0xF7;
-            ntp_packet[4] = 0;
-            ntp_packet[5] = 0;
-            ntp_packet[6] = 0;
-            ntp_packet[7] = 0;
-            ntp_packet[8] = 0;
-            ntp_packet[9] = 0;
-            ntp_packet[10] = 0;
-            ntp_packet[11] = 0x50;
-
-            // time source (namestring)
-            ntp_packet[12] = 69;  // D
-            ntp_packet[13] = 67;  // C
-            ntp_packet[14] = 70;  // F
-            ntp_packet[15] = 0;
-
-            uint64_t referenceTime_uint64_t = getCurrentTimeInNTP64BitFormat();
-
-            ntp_packet[16] = (int)((referenceTime_uint64_t >> 56) & 0xFF);
-            ntp_packet[17] = (int)((referenceTime_uint64_t >> 48) & 0xFF);
-            ntp_packet[18] = (int)((referenceTime_uint64_t >> 40) & 0xFF);
-            ntp_packet[19] = (int)((referenceTime_uint64_t >> 32) & 0xFF);
-            ntp_packet[20] = (int)((referenceTime_uint64_t >> 24) & 0xFF);
-            ntp_packet[21] = (int)((referenceTime_uint64_t >> 16) & 0xFF);
-            ntp_packet[22] = (int)((referenceTime_uint64_t >> 8) & 0xFF);
-            ntp_packet[23] = (int)(referenceTime_uint64_t & 0xFF);
-
-            // copy transmit time from the NTP original request to bytes 24 to 31 of the response packet
-            ntp_packet[24] = ntp_packet[40];
-            ntp_packet[25] = ntp_packet[41];
-            ntp_packet[26] = ntp_packet[42];
-            ntp_packet[27] = ntp_packet[43];
-            ntp_packet[28] = ntp_packet[44];
-            ntp_packet[29] = ntp_packet[45];
-            ntp_packet[30] = ntp_packet[46];
-            ntp_packet[31] = ntp_packet[47];
-
-            // write out the receive time (it was set above) to bytes 32 to 39 of the response packet
-            ntp_packet[32] = (int)((receiveTime_uint64_t >> 56) & 0xFF);
-            ntp_packet[33] = (int)((receiveTime_uint64_t >> 48) & 0xFF);
-            ntp_packet[34] = (int)((receiveTime_uint64_t >> 40) & 0xFF);
-            ntp_packet[35] = (int)((receiveTime_uint64_t >> 32) & 0xFF);
-            ntp_packet[36] = (int)((receiveTime_uint64_t >> 24) & 0xFF);
-            ntp_packet[37] = (int)((receiveTime_uint64_t >> 16) & 0xFF);
-            ntp_packet[38] = (int)((receiveTime_uint64_t >> 8) & 0xFF);
-            ntp_packet[39] = (int)(receiveTime_uint64_t & 0xFF);
-
-            // get the current time and write it out as the transmit time to bytes 40 to 47 of the response packet
-            uint64_t transmitTime_uint64_t = getCurrentTimeInNTP64BitFormat();
-
-            ntp_packet[40] = (int)((transmitTime_uint64_t >> 56) & 0xFF);
-            ntp_packet[41] = (int)((transmitTime_uint64_t >> 48) & 0xFF);
-            ntp_packet[42] = (int)((transmitTime_uint64_t >> 40) & 0xFF);
-            ntp_packet[43] = (int)((transmitTime_uint64_t >> 32) & 0xFF);
-            ntp_packet[44] = (int)((transmitTime_uint64_t >> 24) & 0xFF);
-            ntp_packet[45] = (int)((transmitTime_uint64_t >> 16) & 0xFF);
-            ntp_packet[46] = (int)((transmitTime_uint64_t >> 8) & 0xFF);
-            ntp_packet[47] = (int)(transmitTime_uint64_t & 0xFF);
-
-            sendto(sock, ntp_packet, NTP_PACKET_SIZE, 0, (struct sockaddr *)&source_addr, sizeof(source_addr));
+        if (len < 48) {
+            ESP_LOGE(TAG, "Paket zu kurz oder Fehler: %d", len);
+            continue;
         }
+
+        // === 1. Client Transmit Timestamp SOFORT sichern (Bytes 40-47) ===
+        uint8_t client_transmit_ts[8];
+        memcpy(client_transmit_ts, &ntp_packet[40], 8);
+
+        // === 2. Receive-Zeit nehmen ===
+        uint64_t receiveTime = getCurrentTimeInNTP64BitFormat();
+
+        // === 3. Paket neu aufbauen ===
+        memset(ntp_packet, 0, NTP_PACKET_SIZE);
+
+        // LI=0, VN=4, Mode=4 (Server)
+        ntp_packet[0] = 0x24;
+
+        // Stratum 1
+        ntp_packet[1] = 1;
+
+        // Poll Interval
+        ntp_packet[2] = 4;
+
+        // Precision (ca. 1 µs)
+        ntp_packet[3] = 0xEC;
+
+        // Root Delay + Root Dispersion auf 0 lassen (schon durch memset)
+
+        // Reference ID "DCF\0"
+        ntp_packet[12] = 'D';
+        ntp_packet[13] = 'C';
+        ntp_packet[14] = 'F';
+        ntp_packet[15] = 0;
+
+        // Reference Timestamp (Bytes 16-23) = Receive Time
+        ntp_packet[16] = (receiveTime >> 56) & 0xFF;
+        ntp_packet[17] = (receiveTime >> 48) & 0xFF;
+        ntp_packet[18] = (receiveTime >> 40) & 0xFF;
+        ntp_packet[19] = (receiveTime >> 32) & 0xFF;
+        ntp_packet[20] = (receiveTime >> 24) & 0xFF;
+        ntp_packet[21] = (receiveTime >> 16) & 0xFF;
+        ntp_packet[22] = (receiveTime >>  8) & 0xFF;
+        ntp_packet[23] = (receiveTime      ) & 0xFF;
+
+        // Originate Timestamp (Bytes 24-31) = Client Transmit Timestamp (exakt!)
+        memcpy(&ntp_packet[24], client_transmit_ts, 8);
+
+        // Receive Timestamp (Bytes 32-39)
+        ntp_packet[32] = (receiveTime >> 56) & 0xFF;
+        ntp_packet[33] = (receiveTime >> 48) & 0xFF;
+        ntp_packet[34] = (receiveTime >> 40) & 0xFF;
+        ntp_packet[35] = (receiveTime >> 32) & 0xFF;
+        ntp_packet[36] = (receiveTime >> 24) & 0xFF;
+        ntp_packet[37] = (receiveTime >> 16) & 0xFF;
+        ntp_packet[38] = (receiveTime >>  8) & 0xFF;
+        ntp_packet[39] = (receiveTime      ) & 0xFF;
+
+        // Transmit Timestamp (Bytes 40-47)
+        uint64_t transmitTime = getCurrentTimeInNTP64BitFormat();
+        ntp_packet[40] = (transmitTime >> 56) & 0xFF;
+        ntp_packet[41] = (transmitTime >> 48) & 0xFF;
+        ntp_packet[42] = (transmitTime >> 40) & 0xFF;
+        ntp_packet[43] = (transmitTime >> 32) & 0xFF;
+        ntp_packet[44] = (transmitTime >> 24) & 0xFF;
+        ntp_packet[45] = (transmitTime >> 16) & 0xFF;
+        ntp_packet[46] = (transmitTime >>  8) & 0xFF;
+        ntp_packet[47] = (transmitTime      ) & 0xFF;
+
+        // Absenden
+        sendto(sock, ntp_packet, NTP_PACKET_SIZE, 0,
+               (struct sockaddr *)&source_addr, sizeof(source_addr));
     }
 
     if (sock != -1) {

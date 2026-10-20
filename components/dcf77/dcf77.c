@@ -18,8 +18,11 @@
 #define DCF_PON_GPIO 16  // GPIO-Pin für DCF77 PON
 #define DCF_TCO_GPIO 15  // GPIO-Pin für DCF77 TCO
 
-static const char* TAG = "DCF77";
+static const char *TAG = "DCF77";
 SemaphoreHandle_t xSemaphore = NULL;
+
+static volatile uint32_t last_dcf_sync = 0;   // Unix-Zeit des letzten gültigen Ethernet-Frames
+static volatile int      dcf_time_valid = 0;
 
 // ISR (Interrupt Service Routine)
 static void IRAM_ATTR gpio_isr_handler(void* arg) {
@@ -116,8 +119,30 @@ void dcf77(void* pvParameters) {
                     if (t == -1) {
                         ESP_LOGE(TAG, "Error: time couldn't convert\n");
                     } else {
-                        struct timeval now = {.tv_sec = t, .tv_usec = 0};
-                        settimeofday(&now, NULL);  // Systemtime set on RTC
+                        if (calenderOK && minuteOK && hourOK && startTimeOK && second == 58) {
+                            ESP_LOGI(TAG, "Valid time: %02d:%02d 20%02d-%02d-%02d Weekday: %d DST: %s",
+                                     tm_time.tm_hour, tm_time.tm_min,
+                                     tm_time.tm_year - 100, tm_time.tm_mon + 1, tm_time.tm_mday,
+                                     tm_time.tm_wday, tm_time.tm_isdst == 1 ? "Yes" : "No");
+
+                            // tm_isdst ist bereits durch Bit 17 gesetzt (1 = Sommerzeit, 0 = Winterzeit)
+                            time_t t = mktime(&tm_time);   // Lokalzeit: UTC-Epoch (braucht gesetzte TZ!)
+
+                            if (t == -1) {
+                                ESP_LOGE(TAG, "Error: time couldn't convert");
+                            } else {
+                                struct timeval now = { .tv_sec = t, .tv_usec = 0 };
+                                settimeofday(&now, NULL);
+
+                                // WICHTIG: Flag setzen, damit Fallback & HTTP-Status wissen, dass DCF aktuell ist
+                                last_dcf_sync  = (uint32_t)t;
+                                dcf_time_valid = 1;
+
+                                ESP_LOGI(TAG, "Systemzeit von DCF77 gesetzt");
+                            }
+                        } else {
+                            ESP_LOGE(TAG, "Not a valid time received");
+                        }
                     }
 
                 } else {
@@ -368,4 +393,18 @@ void dcf77(void* pvParameters) {
             }
         }
     }
+}
+
+int dcf77_has_valid_time(void)
+{
+    if (!dcf_time_valid) return 0;
+
+    time_t now;
+    time(&now);
+    return (now - last_dcf_sync) < 600;   // ergibt 1 oder 0
+}
+
+uint32_t dcf77_last_sync_time(void)
+{
+    return last_dcf_sync;
 }

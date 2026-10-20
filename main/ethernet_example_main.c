@@ -9,6 +9,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "http_status.h"
+#include "extern_server_fallback.h"
+#include "dcf77.h"
 #include "esp_eth.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -19,7 +22,6 @@
 #include "lwip/ip_addr.h"
 #include "sdkconfig.h"
 #include "udp_server_task.h"
-#include "dcf77.h"
 
 static const char *TAG = "eth_example";
 
@@ -64,6 +66,8 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base, int32_t
 }
 
 void app_main(void) {
+    setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
+    tzset();
     // Initialize Ethernet driver
     uint8_t eth_port_cnt = 0;
     esp_eth_handle_t *eth_handles;
@@ -108,4 +112,8 @@ void app_main(void) {
 
     xTaskCreatePinnedToCore(dcf77, "dcf77", 4096, NULL, 5, NULL, 0);
     xTaskCreatePinnedToCore(udp_server_task, "udp_server", 4096, NULL, 5, NULL, 1);
+
+    extern_server_fallback_start_watchdog(30000);
+
+    http_status_start();
 }
